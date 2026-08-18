@@ -583,6 +583,25 @@ function makeTranslit(text, targetLang){
 }
 
 /* ================= kalbėjimas ================= */
+/* Vienas daugkartinis grotuvas, atrakinamas paspaudimo metu - tada telefonas
+   leidzia paleisti balsa automatiskai, be papildomo spustelejimo. */
+const SILENT_WAV = 'data:audio/wav;base64,UklGRmQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const voicePlayer = new Audio();
+voicePlayer.setAttribute('playsinline', '');
+voicePlayer.preload = 'auto';
+let audioUnlocked = false;
+function unlockAudio(){
+  if (audioUnlocked) return;
+  audioUnlocked = true;
+  try{ actx().resume(); }catch(e){}
+  try{
+    voicePlayer.muted = true;
+    voicePlayer.src = SILENT_WAV;
+    const p = voicePlayer.play();
+    if (p && p.then) p.then(function(){ voicePlayer.muted = false; }).catch(function(){ voicePlayer.muted = false; });
+    else voicePlayer.muted = false;
+  }catch(e){ voicePlayer.muted = false; }
+}
 let curSrc = null, curAudio = null;
 function stopAudio(){
   try{ if (window.speechSynthesis) speechSynthesis.cancel(); }catch(e){}
@@ -631,17 +650,26 @@ function ttsChunks(text){
 }
 function playOneGoogle(text, lang){
   return new Promise(function(res){
-    const a = new Audio('https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' + lang + '&q=' + encodeURIComponent(text));
+    const a = voicePlayer;   // atrakintas grotuvas - groja be papildomo paspaudimo
     curAudio = a;
-    a.playbackRate = S.rate;
     let settled = false;
-    const fin = function(ok){ if(settled) return; settled = true; if(curAudio===a) curAudio=null; res(ok); };
+    let guard = null;
+    const fin = function(ok){
+      if(settled) return; settled = true;
+      clearTimeout(guard);
+      a.onended = a.onerror = a.onplaying = null;
+      if(curAudio===a) curAudio=null;
+      res(ok);
+    };
     a.onended = function(){ fin(true); };
     a.onerror = function(){ fin(false); };
     a.onplaying = function(){ setState('talking'); };
-    const guard = setTimeout(function(){ if (a.paused && !a.ended) fin(false); }, 7000);
-    a.addEventListener('ended', function(){ clearTimeout(guard); });
-    a.play().catch(function(){ clearTimeout(guard); fin(false); });
+    a.muted = false;
+    a.src = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' + lang + '&q=' + encodeURIComponent(text);
+    a.playbackRate = S.rate;
+    guard = setTimeout(function(){ if (a.paused && !a.ended) fin(false); }, 7000);
+    const p = a.play();
+    if (p && p.catch) p.catch(function(){ fin(false); });
   });
 }
 async function googleTTS(text, lang){
@@ -710,6 +738,7 @@ function renderHist(){
     const b = document.createElement('button');
     b.textContent = (NAME[item.l]||NAME.ru).flag + ' ' + item.t;
     b.onclick = function(){
+      unlockAudio();
       if (S.busy) return;
       showResult({source_lang:item.sl, source_text:item.s, target_lang:item.l, target_text:item.t, transliteration:item.tr});
       S.last = {text:item.t, lang:item.l};
@@ -883,8 +912,8 @@ async function run(){
   }
 }
 
-$('#mic').addEventListener('click', function(){ if(!S.busy) run(); });
-$('#replay').addEventListener('click', function(){ if(S.last && !S.busy) speak(S.last.text, S.last.lang); });
+$('#mic').addEventListener('click', function(){ unlockAudio(); if(!S.busy) run(); });
+$('#replay').addEventListener('click', function(){ unlockAudio(); if(S.last && !S.busy) speak(S.last.text, S.last.lang); });
 
 document.querySelectorAll('.langbar button').forEach(function(b){
   b.addEventListener('click', function(){
