@@ -719,26 +719,45 @@ function renderHist(){
   });
 }
 function finishResult(d){
+  // balsa uzsakome PIRMIAUSIA - garsas kraunasi kol piesiasi UI
+  const spk = speak(d.target_text, d.target_lang);
   showResult(d); pushHist(d);
   S.last = { text:d.target_text, lang:d.target_lang };
   say((NAME[d.target_lang]||NAME.ru).flag + ' ' + d.target_text);
   $('#hint').textContent = 'Paspausk 🔊, kad pakartočiau';
-  return speak(d.target_text, d.target_lang);
+  return spk;
 }
 
 /* ================= greitas atpažinimas naršyklėje ================= */
-function recognizeSR(tag){
+/* vertimo uzsakymas is anksto - dar vaikui bekalbant */
+let pre = { txt:'', promise:null };
+function prefetchTranslate(txt, src, tgt){
+  txt = (txt || '').trim();
+  if (!txt || txt === pre.txt) return;
+  pre = { txt: txt, promise: gtxTranslate(txt, src, tgt).catch(function(){ return null; }) };
+}
+function recognizeSR(tag, src, tgt){
   return new Promise(function(resolve){
     const SRC = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SRC || S.srBroken) return resolve(null);
-    let finalTxt = '', done = false, srErr = null;
+    let finalTxt = '', done = false, srErr = null, preTm = null;
     let rec;
     try{ rec = new SRC(); }catch(e){ return resolve(null); }
-    rec.lang = tag; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 1;
+    // continuous=false: atpazinimas baigiasi PATS vos tik vaikas nutyla - nereikia spausti stop
+    rec.lang = tag; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 1;
     const mic = $('#mic');
     const stopClick = function(){ try{ rec.stop(); }catch(e){} };
-    const tmax = setTimeout(stopClick, 20000);
-    function cleanup(){ mic.removeEventListener('click', stopClick); clearTimeout(tmax); }
+    const tmax = setTimeout(stopClick, 15000);
+    function cleanup(){ mic.removeEventListener('click', stopClick); clearTimeout(tmax); clearTimeout(preTm); }
+    const finish = function(){
+      if (done) return; done = true; cleanup();
+      try{ rec.abort(); }catch(e){}
+      if (srErr && srErr !== 'no-speech' && srErr !== 'aborted' && !finalTxt.trim()){
+        if (srErr === 'not-allowed' || srErr === 'service-not-allowed' || srErr === 'network') S.srBroken = true;
+        return resolve(null);   // krentam i Gemini kelia
+      }
+      resolve(finalTxt.trim());
+    };
     rec.onresult = function(ev){
       let interim = '';
       finalTxt = '';
@@ -747,17 +766,18 @@ function recognizeSR(tag){
         if (ev.results[i].isFinal) finalTxt += t + ' '; else interim += t;
       }
       const shown = (finalTxt + interim).trim();
-      if (shown) say('„' + shown.slice(-70) + '“');
+      if (shown){
+        say('„' + shown.slice(-70) + '“');
+        clearTimeout(preTm);
+        preTm = setTimeout(function(){ prefetchTranslate(shown, src, tgt); }, 350);
+      }
+      if (finalTxt.trim()){
+        prefetchTranslate(finalTxt, src, tgt);
+        finish();               // turim galutini teksta - nelaukiam onend
+      }
     };
     rec.onerror = function(ev){ srErr = ev.error || 'error'; };
-    rec.onend = function(){
-      if (done) return; done = true; cleanup();
-      if (srErr && srErr !== 'no-speech' && srErr !== 'aborted' && !finalTxt.trim()){
-        if (srErr === 'not-allowed' || srErr === 'service-not-allowed' || srErr === 'network') S.srBroken = true;
-        return resolve(null);   // krentam i Gemini kelia
-      }
-      resolve(finalTxt.trim());
-    };
+    rec.onend = finish;
     mic.addEventListener('click', stopClick);
     try{ rec.start(); }catch(e){ done = true; cleanup(); resolve(null); }
   });
@@ -772,7 +792,7 @@ async function runFast(){
   mic.textContent = '⏹️';
   $('#hint').textContent = 'Klausausi... sustosiu, kai nutilsi';
   say('Klausausi! 👂');
-  const heard = await recognizeSR(NAME[src].tag);
+  const heard = await recognizeSR(NAME[src].tag, src, tgt);
   mic.textContent = '🎤';
   if (heard === null){
     // narsykle nemoka - bandome Gemini kelia (reikia rakto)
@@ -784,8 +804,11 @@ async function runFast(){
     setState('idle'); say('Nieko neišgirdau 🙉 Bandom dar kartą!');
     return;
   }
-  setState('thinking'); say('Verčiu... ⚡'); $('#hint').textContent = 'Verčiu...';
-  const out = await freeTranslate(heard, src, tgt);
+  setState('thinking'); $('#hint').textContent = 'Verčiu...';
+  // jei vertimas jau uzsakytas is anksto - naudojam ji
+  let out = null;
+  if (pre.txt === heard && pre.promise) out = await pre.promise;
+  if (!out) out = await freeTranslate(heard, src, tgt);
   await finishResult({
     source_lang: src, source_text: heard,
     target_lang: tgt, target_text: out,
