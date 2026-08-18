@@ -378,10 +378,20 @@ function stopRec(){
 /* ================= Gemini API ================= */
 const API = 'https://generativelanguage.googleapis.com/v1beta/models/';
 
-async function gpost(model, body){
-  const r = await fetch(API + model + ':generateContent?key=' + encodeURIComponent(S.key), {
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
-  });
+async function gpost(model, body, timeoutMs){
+  const ctl = new AbortController();
+  const tm = setTimeout(function(){ ctl.abort(); }, timeoutMs || 60000);
+  let r;
+  try{
+    r = await fetch(API + model + ':generateContent?key=' + encodeURIComponent(S.key), {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body), signal: ctl.signal
+    });
+  }catch(e){
+    clearTimeout(tm);
+    if (ctl.signal.aborted){ const er = new Error('Užklausa užtruko per ilgai'); er.timeout = true; throw er; }
+    throw e;
+  }
+  clearTimeout(tm);
   if (!r.ok){
     let msg = 'HTTP ' + r.status;
     try{ const e = await r.json(); msg = (e.error && e.error.message) || msg; }catch(_){}
@@ -399,7 +409,7 @@ function isGoneError(e){
   const m = String(e && e.message || '');
   return (e && e.status === 404) || /not found|no longer available|has been deprecated|is deprecated|not supported for|unsupported model/i.test(m);
 }
-async function gpostAny(kind, body){
+async function gpostAny(kind, body, timeoutMs){
   const cacheKey = 'lingo.model.' + kind;
   let list = MODELS[kind].slice();
   const cached = LS.getItem(cacheKey);
@@ -409,13 +419,13 @@ async function gpostAny(kind, body){
   let lastErr = null;
   for (const m of list){
     try{
-      const j = await gpost(m, body);
+      const j = await gpost(m, body, timeoutMs);
       LS.setItem(cacheKey, m);
       return j;
     }catch(e){
       lastErr = e;
-      if (isGoneError(e)) continue;   // modelis isjungtas - bandome kita
-      throw e;                        // kita klaida (raktas, kvota) - nutraukiam
+      if (isGoneError(e) || e.timeout) continue;  // modelis isjungtas arba stringa - bandome kita
+      throw e;                                    // kita klaida (raktas, kvota) - nutraukiam
     }
   }
   throw lastErr;
@@ -435,29 +445,47 @@ function trPrompt(){
 '- Jokių paaiškinimų, tik JSON.';
 }
 async function translate(wav){
-  const j = await gpostAny('tr', {
-    contents:[{ role:'user', parts:[
-      { text: trPrompt() },
-      { inline_data: { mime_type:'audio/wav', data: toB64(wav) } }
-    ]}],
-    generationConfig:{
-      temperature: 0.2,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type:'OBJECT',
-        properties:{
-          source_lang:{ type:'STRING', enum:['lt','ru'] },
-          source_text:{ type:'STRING' },
-          target_lang:{ type:'STRING', enum:['lt','ru'] },
-          target_text:{ type:'STRING' },
-          transliteration:{ type:'STRING' }
-        },
-        required:['source_lang','source_text','target_lang','target_text','transliteration']
-      }
+  const baseCfg = {
+    temperature: 0.2,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type:'OBJECT',
+      properties:{
+        source_lang:{ type:'STRING', enum:['lt','ru'] },
+        source_text:{ type:'STRING' },
+        target_lang:{ type:'STRING', enum:['lt','ru'] },
+        target_text:{ type:'STRING' },
+        transliteration:{ type:'STRING' }
+      },
+      required:['source_lang','source_text','target_lang','target_text','transliteration']
     }
-  });
-  const parts = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
-  const txt = parts.map(function(p){ return p.text||''; }).join('');
+  };
+  const parts = [
+    { text: trPrompt() },
+    { inline_data: { mime_type:'audio/wav', data: toB64(wav) } }
+  ];
+  // isjungiam ilga "mastyma": nauji modeliai - thinkingLevel, seni - thinkingBudget, galiausiai be nieko
+  const variants = [
+    { thinkingConfig: { thinkingLevel: 'low' } },
+    { thinkingConfig: { thinkingBudget: 0 } },
+    {}
+  ];
+  let j = null, lastErr = null;
+  for (const v of variants){
+    const cfg = Object.assign({}, baseCfg, v);
+    try{
+      j = await gpostAny('tr', { contents:[{ role:'user', parts: parts }], generationConfig: cfg }, 45000);
+      break;
+    }catch(e){
+      lastErr = e;
+      if (e && e.status === 400 && /thinking|invalid argument|unknown (name|field)/i.test(String(e.message||''))) continue;
+      throw e;
+    }
+  }
+  if (!j) throw lastErr;
+  const ps = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
+  const txt = ps.filter(function(p){ return !p.thought; }).map(function(p){ return p.text||''; }).join('').trim();
+  if (!txt) throw new Error('Gautas tuščias atsakymas');
   return JSON.parse(txt);
 }
 
@@ -471,7 +499,7 @@ async function geminiTTS(text){
       responseModalities:['AUDIO'],
       speechConfig:{ voiceConfig:{ prebuiltVoiceConfig:{ voiceName: S.voice } } }
     }
-  });
+  }, 45000);
   const parts = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
   let inl = null;
   for (const p of parts){ if (p.inlineData || p.inline_data){ inl = p.inlineData || p.inline_data; break; } }
@@ -606,7 +634,11 @@ async function run(){
       return;
     }
     setState('thinking'); say('Galvoju... 🤔'); $('#hint').textContent = 'Verčiu...';
-    const d = await translate(rec.wav);
+    const hb1 = setTimeout(function(){ if(state==='thinking') say('Dar verčiu... ⏳'); }, 8000);
+    const hb2 = setTimeout(function(){ if(state==='thinking') say('Sekundėlę, jau beveik! 🤯'); }, 20000);
+    let d;
+    try{ d = await translate(rec.wav); }
+    finally{ clearTimeout(hb1); clearTimeout(hb2); }
     if (!d.source_text || !d.source_text.trim()){
       setState('idle'); say('Negirdėjau žodžių 🙉 Pabandyk garsiau!');
       return;
@@ -620,6 +652,7 @@ async function run(){
     setState('idle');
     const m = String(err && err.message || err);
     if (/NotAllowed|Permission|denied/i.test(m)) say('Leisk naudoti mikrofoną 🎤');
+    else if (err && err.timeout) say('Google neatsako 😴 Pabandyk dar kartą');
     else if (isGoneError(err)) say('Google modelis nepasiekiamas 😕 Bandyk dar kartą');
     else if (err && (err.status===400 || err.status===403)) say('Patikrink API raktą ⚙️');
     else if (err && err.status===429) say('Per daug užklausų 😴 Palauk minutę');
