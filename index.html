@@ -230,7 +230,7 @@
       <button class="btn ghost" id="dlgClose">✕</button>
       <button class="btn" id="dlgSave">Išsaugoti</button>
     </div>
-    <div class="tiny">Nemokamą raktą gauk per 1 min: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a><br>Versija: <b id="ver">9</b> (2026-08-18)</div>
+    <div class="tiny">Nemokamą raktą gauk per 1 min: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a><br>Versija: <b id="ver">10</b> (2026-08-18)</div>
   </div>
 </dialog>
 
@@ -680,14 +680,7 @@ function playOneGoogle(text, lang){
     a.onplaying = function(){ setState('talking'); };
     a.muted = false;
     a.src = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' + lang + '&q=' + encodeURIComponent(text);
-    const FUNV = { fun:1.28, mouse:1.5, giant:0.72 };   // personazu balsai is to paties nemokamo balso
-    if (S.voice in FUNV){
-      a.preservesPitch = false; a.webkitPreservesPitch = false;
-      a.playbackRate = FUNV[S.voice];
-    } else {
-      a.preservesPitch = true; a.webkitPreservesPitch = true;
-      a.playbackRate = S.rate;
-    }
+    a.playbackRate = S.rate;
     guard = setTimeout(function(){ if (a.paused && !a.ended) fin(false); }, 7000);
     const p = a.play();
     if (p && p.catch) p.catch(function(){ fin(false); });
@@ -702,7 +695,7 @@ async function googleTTS(text, lang){
   setState('idle');
   return true;
 }
-function browserSpeak(text, lang){
+function browserSpeak(text, lang, opts){
   return new Promise(function(res){
     if (!window.speechSynthesis) return res(false);
     const vs = speechSynthesis.getVoices();
@@ -710,7 +703,9 @@ function browserSpeak(text, lang){
     const v = vs.find(function(x){ return x.lang && x.lang.toLowerCase().replace('_','-').indexOf(l2)===0; });
     if (!v) return res(false);
     const u = new SpeechSynthesisUtterance(text);
-    u.voice = v; u.lang = v.lang; u.rate = S.rate; u.pitch = 1.15;
+    u.voice = v; u.lang = v.lang;
+    u.rate = (opts && opts.rate) || S.rate;
+    u.pitch = (opts && opts.pitch) || 1.15;
     setState('talking');
     let done = false;
     const fin = function(){ if(done) return; done=true; setState('idle'); res(true); };
@@ -719,10 +714,18 @@ function browserSpeak(text, lang){
     setTimeout(fin, 2000 + text.length*150);
   });
 }
+/* personazu balsai - per telefono kalbos sinteze (tikras tono valdymas) */
+const FUNVOICES = { fun:{pitch:1.5, rate:1.08}, mouse:{pitch:1.9, rate:1.15}, giant:{pitch:0.45, rate:0.82} };
 async function speak(text, lang){
   if (!text) return;
   stopAudio();
-  const wantGemini = ['google','fun','mouse','giant'].indexOf(S.voice) < 0 && S.key;
+  if (FUNVOICES[S.voice]){
+    if (await browserSpeak(text, lang, FUNVOICES[S.voice])){ wave(1300); return; }
+    // telefone nera tokios kalbos balso - grojam iprasta, kad nebutu tylos
+    if (await googleTTS(text, lang)){ wave(1300); return; }
+    setState('idle'); say('Nepavyko įgarsinti 😕 Perskaityk: ' + text); return;
+  }
+  const wantGemini = (S.voice !== 'google') && S.key;
   if (wantGemini){
     try{
       const a = await geminiTTS(text);
