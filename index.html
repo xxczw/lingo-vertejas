@@ -211,10 +211,11 @@
     <input id="key" type="password" placeholder="AIza..." autocomplete="off" spellcheck="false">
     <label>Balsas</label>
     <select id="voice">
-      <option value="google" selected>Greitas balsas (rekomenduojama)</option>
-      <option value="Leda">Gemini: Leda — šiltas (reikia rakto)</option>
-      <option value="Kore">Gemini: Kore — tvirtas (reikia rakto)</option>
-      <option value="Puck">Gemini: Puck — linksmas (reikia rakto)</option>
+      <option value="google" selected>Greitas balsas (visada veikia)</option>
+      <option value="fun">Linksmas balsiukas 🐿️ (visada veikia)</option>
+      <option value="Puck">Gemini: Puck — linksmas (ribota kvota)</option>
+      <option value="Leda">Gemini: Leda — šiltas (ribota kvota)</option>
+      <option value="Kore">Gemini: Kore — tvirtas (ribota kvota)</option>
     </select>
     <label>Kalbėjimo greitis</label>
     <select id="rate">
@@ -227,7 +228,7 @@
       <button class="btn ghost" id="dlgClose">✕</button>
       <button class="btn" id="dlgSave">Išsaugoti</button>
     </div>
-    <div class="tiny">Nemokamą raktą gauk per 1 min: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a><br>Versija: <b id="ver">7</b> (2026-08-18)</div>
+    <div class="tiny">Nemokamą raktą gauk per 1 min: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a><br>Versija: <b id="ver">8</b> (2026-08-18)</div>
   </div>
 </dialog>
 
@@ -349,6 +350,7 @@ function b64ToBytes(b64){
 
 /* ================= WAV įrašymas (Gemini keliui) ================= */
 let stream=null, src=null, proc=null, sink=null, chunks=[], recording=false;
+const vad = { sawSpeech:false, lastLoud:0, onAuto:null };   // tylos aptikimas - sustoja pats
 async function startRec(){
   const c = actx();
   if (c.state === 'suspended') await c.resume();
@@ -357,9 +359,19 @@ async function startRec(){
   proc = c.createScriptProcessor(4096, 1, 1);
   sink = c.createGain(); sink.gain.value = 0;
   chunks = [];
+  vad.sawSpeech = false; vad.lastLoud = Date.now();
   proc.onaudioprocess = function(e){
     if (!recording) return;
-    chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    const d = e.inputBuffer.getChannelData(0);
+    chunks.push(new Float32Array(d));
+    // garsumo matavimas (kas 4-ta reiksme, kad butu greita)
+    let sum = 0, n = 0;
+    for (let i=0;i<d.length;i+=4){ sum += d[i]*d[i]; n++; }
+    const rms = Math.sqrt(sum/n);
+    if (rms > 0.025){ vad.sawSpeech = true; vad.lastLoud = Date.now(); }
+    else if (vad.sawSpeech && Date.now() - vad.lastLoud > 1300 && vad.onAuto){
+      const f = vad.onAuto; vad.onAuto = null; f();   // vaikas nutilo - baigiam patys
+    }
   };
   src.connect(proc); proc.connect(sink); sink.connect(c.destination);
   recording = true;
@@ -666,7 +678,14 @@ function playOneGoogle(text, lang){
     a.onplaying = function(){ setState('talking'); };
     a.muted = false;
     a.src = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' + lang + '&q=' + encodeURIComponent(text);
-    a.playbackRate = S.rate;
+    if (S.voice === 'fun'){
+      // linksmas aukstesnis balsiukas: greitiname nekoreguodami tono
+      a.preservesPitch = false; a.webkitPreservesPitch = false;
+      a.playbackRate = Math.min(1.3, S.rate * 1.32);
+    } else {
+      a.preservesPitch = true; a.webkitPreservesPitch = true;
+      a.playbackRate = S.rate;
+    }
     guard = setTimeout(function(){ if (a.paused && !a.ended) fin(false); }, 7000);
     const p = a.play();
     if (p && p.catch) p.catch(function(){ fin(false); });
@@ -701,7 +720,7 @@ function browserSpeak(text, lang){
 async function speak(text, lang){
   if (!text) return;
   stopAudio();
-  const wantGemini = (S.voice !== 'google') && S.key;
+  const wantGemini = (S.voice !== 'google') && (S.voice !== 'fun') && S.key;
   if (wantGemini){
     try{
       const a = await geminiTTS(text);
@@ -850,13 +869,14 @@ async function runGemini(){
   const mic = $('#mic');
   setState('listening');
   mic.textContent = '⏹️';
-  $('#hint').textContent = 'Klausausi... paspausk, kai baigsi';
+  $('#hint').textContent = 'Klausausi... sustosiu, kai nutilsi';
   say('Klausausi! 👂');
   await startRec();
   await new Promise(function(res){
-    const done = function(){ mic.removeEventListener('click', done); res(); };
+    const done = function(){ mic.removeEventListener('click', done); vad.onAuto = null; res(); };
     mic.addEventListener('click', done);
-    setTimeout(function(){ if(recording) done(); }, 20000);
+    vad.onAuto = done;                                    // sustoja pats vaikui nutilus
+    setTimeout(function(){ if(recording) done(); }, 15000);
   });
   const rec = stopRec();
   mic.textContent = '🎤';
